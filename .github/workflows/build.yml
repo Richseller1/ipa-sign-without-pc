@@ -1,0 +1,80 @@
+name: Build Debug APK
+
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build Android APK
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v5
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+          cache: 'gradle'
+
+      - name: Setup Android SDK Components & NDK
+        run: |
+          echo "ANDROID_HOME: $ANDROID_HOME"
+          echo "ANDROID_SDK_ROOT: $ANDROID_SDK_ROOT"
+          
+          # Find sdkmanager in PATH or runner's preinstalled cmdline-tools
+          if command -v sdkmanager >/dev/null 2>&1; then
+            SDKMANAGER="sdkmanager"
+          elif [ -f "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" ]; then
+            SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          elif [ -f "$ANDROID_HOME/cmdline-tools/16.0/bin/sdkmanager" ]; then
+            SDKMANAGER="$ANDROID_HOME/cmdline-tools/16.0/bin/sdkmanager"
+          else
+            SDKMANAGER=$(find "$ANDROID_HOME/cmdline-tools" -name sdkmanager -type f | head -n 1)
+          fi
+          echo "Using sdkmanager: $SDKMANAGER"
+          
+          # Accept all Android SDK licenses
+          yes | "$SDKMANAGER" --licenses > /dev/null 2>&1 || true
+          
+          # Install required platform, CMake, and project-specific NDK version
+          "$SDKMANAGER" --install \
+            "platforms;android-36" \
+            "cmake;3.22.1" \
+            "ndk;26.3.11579264"
+          
+          echo "Installed NDKs:"
+          ls -la "$ANDROID_HOME/ndk" || true
+          echo "Installed CMakes:"
+          ls -la "$ANDROID_HOME/cmake" || true
+
+      - name: Prepare Build Environment
+        run: |
+          # Ensure gradlew has executable permissions
+          chmod +x gradlew
+          
+          # Ensure .env exists for the Secrets Gradle Plugin
+          if [ ! -f .env ]; then
+            touch .env
+          fi
+          
+          # Ensure debug.keystore exists so signingConfig debugConfig succeeds
+          if [ ! -f debug.keystore ]; then
+            keytool -genkey -v -keystore debug.keystore -storepass android \
+              -alias androiddebugkey -keypass android -keyalg RSA -keysize 2048 \
+              -validity 10000 -dname "CN=Android Debug,O=Android,C=US"
+          fi
+
+      - name: Build with Gradle
+        run: ./gradlew assembleDebug --stacktrace
+
+      - name: Upload APK Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-debug-apk
+          path: app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
+          retention-days: 14

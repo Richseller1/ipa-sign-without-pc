@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <group
+        android:pivotX="54"
+        android:pivotY="54">
+        <!-- Phone Device Frame -->
+        <path
+            android:fillColor="#38BDF8"
+            android:pathData="M38,28 C34.69,28 32,30.69 32,34 L32,74 C32,77.31 34.69,80 38,80 L70,80 C73.31,80 76,77.31 76,74 L76,34 C76,30.69 73.31,28 70,28 L38,28 Z M36,36 L72,36 L72,70 L36,70 L36,36 Z" />
+        <!-- Screen Interior Background -->
+        <path
+            android:fillColor="#0284C7"
+            android:pathData="M36,36 L72,36 L72,70 L36,70 Z"
+            android:alpha="0.3" />
+        <!-- Home bar / indicator -->
+        <path
+            android:fillColor="#FFFFFF"
+            android:pathData="M48,75 L60,75 C60.55,75 61,75.45 61,76 C61,76.55 60.55,77 60,77 L48,77 C47.45,77 47,76.55 47,76 C47,75.45 47.45,75 48,75 Z" />
+        <!-- Dynamic Island / Speaker notch -->
+        <path
+            android:fillColor="#FFFFFF"
+            android:pathData="M51,31 L57,31 C57.55,31 58,31.45 58,32 C58,32.55 57.55,33 57,33 L51,33 C50.45,33 50,32.55 50,32 C50,31.45 50.45,31 51,31 Z" />
+        <!-- USB / Cable Bridge Symbol on Screen -->
+        <path
+            android:fillColor="#FFFFFF"
+            android:pathData="M52,43 L56,43 L56,51 L59,51 L54,58 L49,51 L52,51 Z" />
+        <path
+            android:fillColor="#38BDF8"
+            android:pathData="M50,60 L58,60 C58.55,60 59,60.45 59,61 L59,65 C59,65.55 58.55,66 58,66 L50,66 C49.45,66 49,65.55 49,65 L49,61 C49,60.45 49.45,60 50,60 Z" />
+        <path
+            android:fillColor="#E2E8F0"
+            android:pathData="M52,66 L56,66 L56,68 L52,68 Z" />
+    </group>
+</vector>

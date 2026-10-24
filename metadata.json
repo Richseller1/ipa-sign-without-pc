@@ -1,0 +1,8 @@
+{
+  "name": "Remix Remix iOS Android Bridge Integration ",
+  "description": "Integrate libusbmuxd into your Android app for direct iPhone communication without root or custom protocol reimplementation.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
