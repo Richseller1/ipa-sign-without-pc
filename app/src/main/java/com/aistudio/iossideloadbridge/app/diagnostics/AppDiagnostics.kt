@@ -30,8 +30,14 @@ object AppDiagnostics {
     private const val LOG_FILE_NAME = "diagnostics.log"
     private const val CRASH_FILE_NAME = "last_crash.txt"
 
-    const val BUILD_ID = "bld-20261024-session-persist-v13"
+    const val BUILD_ID = "bld-20261025-init-diag-v14"
     const val GIT_COMMIT = "740d752d"
+
+    @Volatile
+    var advancedDiagnosticsEnabled: Boolean = false
+
+    @Volatile
+    var selectedAnisetteHost: String? = null
 
     // ---- Authentication Diagnostic Trace ----
     private val authTraceList = java.util.Collections.synchronizedList(mutableListOf<String>())
@@ -45,6 +51,12 @@ object AppDiagnostics {
         if (authTraceList.size > 200) {
             authTraceList.removeAt(0)
         }
+    }
+
+    fun logAdvancedAuthTrace(message: String) {
+        if (!advancedDiagnosticsEnabled) return
+        val safe = redactSecrets(message)
+        logAuthTrace("[ADV-DIAG] $safe")
     }
 
     fun getAuthTrace(): List<String> {
@@ -62,13 +74,15 @@ object AppDiagnostics {
         s = s.replace(Regex("""-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----"""), "[REDACTED_PRIVATE_KEY]")
         // Mask passwords
         s = s.replace(Regex("""(?i)\b(password)\b[\"']?\s*[:=]\s*[\"']?[^\s\"',;]+"""), "$1: ***")
-        // Mask auth tokens & session IDs
-        s = s.replace(Regex("""(?i)\b(authToken|idmsToken|adsid|dsid|pet|passwordToken|X-Apple-GS-Token|X-Apple-I-Identity-Id)\b[\"']?\s*[:=]\s*[\"']?[A-Za-z0-9+/=._-]+"""), "$1=***")
+        // Mask auth tokens, session IDs & device/anisette identifiers
+        s = s.replace(Regex("""(?i)\b(authToken|idmsToken|adsid|dsid|pet|passwordToken|X-Apple-GS-Token|X-Apple-I-Identity-Id|deviceId|X-Mme-Device-Id|X-Apple-I-MD|X-Apple-I-MD-M|X-Apple-I-MD-LU)\b[\"']?\s*[:=]\s*[\"']?[A-Za-z0-9+/=._-]+"""), "$1=***")
         s = s.replace(Regex("""(?i)\b(token)\b[\"']?\s*=\s*[\"']?[A-Za-z0-9+/=._-]+"""), "$1=***")
         // Mask 6-digit 2FA codes
         s = s.replace(Regex("""(?i)\b(code|twoFactorCode)\b[\"']?\s*[:=]\s*[\"']?\d{6}"""), "$1=******")
-        // Mask email addresses (e.g. a***@domain.com)
+        // Mask email addresses / account names (e.g. a***@domain.com)
         s = s.replace(Regex("""\b([A-Za-z0-9_.+-])[A-Za-z0-9_.+-]*@([A-Za-z0-9-]+\.[A-Za-z0-9-.]+)\b"""), "$1***@$2")
+        // Mask full UUID device IDs (8-4-4-4-12 hex)
+        s = s.replace(Regex("""\b([0-9a-fA-F]{4})[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b"""), "$1****-****-****-****-************")
         // Mask SRP keys & large byte arrays
         s = s.replace(Regex("""(?i)\b(srpA|srpB|srpK|srpM1|salt)\b[\"']?\s*[:=]\s*[\"']?[A-Za-z0-9+/=._-]{16,}"""), "$1=***")
         return s

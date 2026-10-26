@@ -161,7 +161,7 @@ class AppleAuthClient(
     ): Result<SignInState> = withContext(Dispatchers.IO) {
         try {
             val normalizedAppleId = appleId.trim().lowercase(java.util.Locale.US)
-            AppDiagnostics.logAuthTrace("Starting GSA SRP-6a login for $normalizedAppleId (step: init)...")
+            AppDiagnostics.logAuthTrace(AppDiagnostics.redactSecrets("Starting GSA SRP-6a login (step: init)..."))
 
             // ==========================================
             // Step 1: Initial SRP Request (o: "init")
@@ -199,11 +199,88 @@ class AppleAuthClient(
             )
 
             val initHttpRequest = buildGsaRequest(GSA_ENDPOINT, initPayload, anisetteHeaders)
+
+            if (AppDiagnostics.advancedDiagnosticsEnabled) {
+                val allHeaderNames = initHttpRequest.headers.names().toList()
+                val safeHeadersSummary = allHeaderNames.joinToString(", ") { name ->
+                    if (name.equals("Content-Type", ignoreCase = true) ||
+                        name.equals("Accept", ignoreCase = true) ||
+                        name.equals("User-Agent", ignoreCase = true)
+                    ) {
+                        "$name=\"${initHttpRequest.header(name)}\""
+                    } else {
+                        "$name=(name-only)"
+                    }
+                }
+                AppDiagnostics.logAdvancedAuthTrace(
+                    "init outgoing HTTP: url=${initHttpRequest.url}, method=${initHttpRequest.method}, headerNames=$allHeaderNames, headers=[$safeHeadersSummary]"
+                )
+
+                val parsedOutgoingInit = ApplePlist.fromXml(initPayload)
+                fun plistTypeOf(v: Any?): String = when (v) {
+                    is String -> "string"
+                    is Long, is Int, is Short, is Byte -> "integer"
+                    is Boolean -> "boolean"
+                    is ByteArray -> "data"
+                    is Map<*, *> -> "dict"
+                    is List<*> -> "array"
+                    null -> "null"
+                    else -> v.javaClass.simpleName
+                }
+                val rootOuterTypes = parsedOutgoingInit.entries.sortedBy { it.key }.joinToString(", ") { (k, v) -> "$k: ${plistTypeOf(v)}" }
+                @Suppress("UNCHECKED_CAST")
+                val reqDict = parsedOutgoingInit["Request"] as? Map<String, Any?> ?: emptyMap()
+                val reqOuterTypes = reqDict.entries.sortedBy { it.key }.joinToString(", ") { (k, v) -> "$k: ${plistTypeOf(v)}" }
+                AppDiagnostics.logAdvancedAuthTrace(
+                    "init outgoing outer plist keys & types: root=[$rootOuterTypes], Request=[$reqOuterTypes]"
+                )
+
+                val ct = anisetteHeaders.clientTime
+                val ctState = if (ct.isEmpty()) "empty" else "non-empty"
+                val ctMask = ct.replace(Regex("\\d"), "N")
+                val ctFormat = when {
+                    ct.isEmpty() -> "empty"
+                    Regex("^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}Z$").matches(ct) -> "ISO8601-UTC-sec ($ctMask)"
+                    Regex("^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d+Z$").matches(ct) -> "ISO8601-UTC-frac ($ctMask)"
+                    Regex("^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}[+-]\\d{2}:\\d{2}$").matches(ct) -> "ISO8601-offset ($ctMask)"
+                    else -> "pattern($ctMask)"
+                }
+                fun fieldSummary(v: String): String = "${if (v.isEmpty()) "empty" else "non-empty"} (len=${v.length})"
+                val anisetteFieldsSummary = listOf(
+                    "X-Apple-I-Client-Time=$ctState (len=${ct.length}, format=$ctFormat)",
+                    "X-Apple-I-MD=${fieldSummary(anisetteHeaders.md)}",
+                    "X-Apple-I-MD-M=${fieldSummary(anisetteHeaders.mdM)}",
+                    "X-Apple-I-MD-RINFO=${fieldSummary(anisetteHeaders.mdRinfo)}",
+                    "X-Apple-I-MD-LU=${fieldSummary(anisetteHeaders.mdLu)}",
+                    "X-Apple-I-SRL-NO=${fieldSummary(anisetteHeaders.srlNo)}",
+                    "X-MMe-Client-Info=${fieldSummary(anisetteHeaders.clientInfo)}",
+                    "X-Apple-I-TimeZone=${fieldSummary(anisetteHeaders.timeZone)}",
+                    "X-Apple-Locale=${fieldSummary(anisetteHeaders.locale)}",
+                    "X-Mme-Device-Id=${fieldSummary(anisetteHeaders.deviceId)}"
+                ).joinToString(", ")
+                AppDiagnostics.logAdvancedAuthTrace(
+                    "init outgoing anisette fields: [$anisetteFieldsSummary]"
+                )
+
+                val a2kFirstIsZero = aBytes.isNotEmpty() && aBytes[0] == 0.toByte()
+                AppDiagnostics.logAdvancedAuthTrace(
+                    "init outgoing A2k: byteLength=${aBytes.size}, firstByteIs0x00=$a2kFirstIsZero"
+                )
+            }
+
             AppDiagnostics.logAuthTrace("init request sent")
             val initHttpResponse = executeHttpRequest(initHttpRequest)
             AppDiagnostics.logAuthTrace("init response received: HTTP ${initHttpResponse.code}")
 
             val initParsed = ApplePlist.fromXml(initHttpResponse.body)
+            if (AppDiagnostics.advancedDiagnosticsEnabled) {
+                val topLevelResponseKeys = initParsed.keys.sorted()
+                @Suppress("UNCHECKED_CAST")
+                val innerResponseKeys = (initParsed["Response"] as? Map<String, Any?>)?.keys?.sorted() ?: emptyList()
+                AppDiagnostics.logAdvancedAuthTrace(
+                    "init response summary: HTTP ${initHttpResponse.code}, topLevelPlistKeys=$topLevelResponseKeys, responseDictKeys=$innerResponseKeys"
+                )
+            }
             val initStatus = AppleResponseHelper.parseStatus(initParsed, initHttpResponse.code)
             if (!initStatus.isSuccess) {
                 return@withContext parseGsaError(initParsed, initHttpResponse.body, initHttpResponse.code, "init")
@@ -596,7 +673,7 @@ class AppleAuthClient(
                 pet = xcodeToken,
                 tokens = tokensMap
             )
-            AppDiagnostics.logAuthTrace("Session ready: adsid=$adsid, tokensCount=${tokensMap.size}")
+            AppDiagnostics.logAuthTrace(AppDiagnostics.redactSecrets("Session ready: tokensCount=${tokensMap.size}"))
             Result.success(SignInState.Success(session))
 
         } catch (e: Exception) {

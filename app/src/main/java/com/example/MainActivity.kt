@@ -3462,10 +3462,16 @@ fun SettingsTabScreen(
 
     var showClearDataDialog by remember { mutableStateOf(false) }
     var verboseLoggingEnabled by remember { mutableStateOf(false) }
+    var advancedDiagnosticsEnabled by remember {
+        mutableStateOf(com.aistudio.iossideloadbridge.app.diagnostics.AppDiagnostics.advancedDiagnosticsEnabled)
+    }
 
     val anisetteClient = remember { AnisetteClient(timeoutSeconds = 5L) }
     val serverList = AnisetteClient.OFFICIAL_SERVERS
-    var selectedServer by remember { mutableStateOf(serverList[0]) }
+    // null = Automatic (current default fallback order); otherwise a specific host name
+    var selectedHost by remember {
+        mutableStateOf(com.aistudio.iossideloadbridge.app.diagnostics.AppDiagnostics.selectedAnisetteHost)
+    }
 
     var serverStatuses by remember { mutableStateOf<Map<String, ServerCheckResult>>(emptyMap()) }
     var isCheckingServers by remember { mutableStateOf(false) }
@@ -3477,8 +3483,9 @@ fun SettingsTabScreen(
     // Auto-check the first server on initial view to provide immediate feedback
     LaunchedEffect(Unit) {
         if (serverStatuses.isEmpty()) {
-            val result = anisetteClient.checkServer(selectedServer)
-            serverStatuses = mapOf(selectedServer to result)
+            val targetUrl = selectedHost?.let { AnisetteClient.normalizeToServerUrl(it) } ?: serverList[0]
+            val result = anisetteClient.checkServer(targetUrl)
+            serverStatuses = mapOf(targetUrl to result)
         }
     }
 
@@ -3567,16 +3574,78 @@ fun SettingsTabScreen(
                 }
 
                 Text(
-                    text = "Anisette generates hardware attestation headers (X-Apple-I-MD, etc.) required for Apple GSA authentication without a physical Mac.",
+                    text = "Choose Automatic (default fallback order) or a specific Anisette server by host name.",
                     style = MaterialTheme.typography.bodySmall,
                     color = TextSecondary
                 )
 
-                // Server List with Real Reachability Status
+                // Server Host Selection List (Default: Automatic order + specific host names)
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    val isAutoSelected = selectedHost == null
+                    Surface(
+                        color = if (isAutoSelected) CalmBlueContainer.copy(alpha = 0.35f) else DarkBackground,
+                        shape = RoundedCornerShape(10.dp),
+                        border = androidx.compose.foundation.BorderStroke(
+                            1.dp,
+                            if (isAutoSelected) CalmBlue else DarkBorder
+                        ),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("anisette_host_auto_option")
+                            .clickable {
+                                selectedHost = null
+                                com.aistudio.iossideloadbridge.app.diagnostics.AppDiagnostics.selectedAnisetteHost = null
+                            }
+                    ) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 12.dp, vertical = 10.dp),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                ) {
+                                    Text(
+                                        text = "Automatic (default order)",
+                                        fontWeight = if (isAutoSelected) FontWeight.SemiBold else FontWeight.Normal,
+                                        fontSize = 12.sp,
+                                        color = TextPrimary
+                                    )
+                                    Text(
+                                        text = "Default",
+                                        fontSize = 9.sp,
+                                        color = CalmBlueLight,
+                                        modifier = Modifier
+                                            .background(CalmBlueContainer.copy(alpha = 0.5f), RoundedCornerShape(4.dp))
+                                            .padding(horizontal = 4.dp, vertical = 1.dp)
+                                    )
+                                }
+                                Text(
+                                    text = AnisetteClient.OFFICIAL_HOSTS.joinToString(" → "),
+                                    fontFamily = FontFamily.Monospace,
+                                    fontSize = 10.sp,
+                                    color = TextMuted
+                                )
+                            }
+                            if (isAutoSelected) {
+                                Icon(
+                                    imageVector = Icons.Default.CheckCircle,
+                                    contentDescription = "Selected",
+                                    tint = CalmBlue,
+                                    modifier = Modifier.size(18.dp)
+                                )
+                            }
+                        }
+                    }
+
                     serverList.forEach { serverUrl ->
+                        val hostName = AnisetteClient.extractHostName(serverUrl)
                         val check = serverStatuses[serverUrl]
-                        val isSelected = selectedServer == serverUrl
+                        val isSelected = selectedHost == hostName
 
                         Surface(
                             color = if (isSelected) CalmBlueContainer.copy(alpha = 0.35f) else DarkBackground,
@@ -3587,7 +3656,11 @@ fun SettingsTabScreen(
                             ),
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .clickable { selectedServer = serverUrl }
+                                .testTag("anisette_host_option_$hostName")
+                                .clickable {
+                                    selectedHost = hostName
+                                    com.aistudio.iossideloadbridge.app.diagnostics.AppDiagnostics.selectedAnisetteHost = hostName
+                                }
                         ) {
                             Row(
                                 modifier = Modifier
@@ -3602,22 +3675,12 @@ fun SettingsTabScreen(
                                         horizontalArrangement = Arrangement.spacedBy(6.dp)
                                     ) {
                                         Text(
-                                            text = serverUrl,
+                                            text = hostName,
                                             fontFamily = FontFamily.Monospace,
                                             fontWeight = if (isSelected) FontWeight.SemiBold else FontWeight.Normal,
                                             fontSize = 12.sp,
                                             color = TextPrimary
                                         )
-                                        if (serverUrl == serverList.first()) {
-                                            Text(
-                                                text = "Default",
-                                                fontSize = 9.sp,
-                                                color = CalmBlueLight,
-                                                modifier = Modifier
-                                                    .background(CalmBlueContainer.copy(alpha = 0.5f), RoundedCornerShape(4.dp))
-                                                    .padding(horizontal = 4.dp, vertical = 1.dp)
-                                            )
-                                        }
                                     }
 
                                     // Real status text per server
@@ -3706,7 +3769,7 @@ fun SettingsTabScreen(
                                     testFetchResult = null
                                     val start = System.currentTimeMillis()
                                     try {
-                                        val result = anisetteClient.fetchAnisetteHeaders(preferredServer = selectedServer)
+                                        val result = anisetteClient.fetchAnisetteHeaders(preferredServer = selectedHost)
                                         testFetchDurationMs = System.currentTimeMillis() - start
                                         testFetchResult = result
                                         // Update status of the winning server
@@ -3791,7 +3854,7 @@ fun SettingsTabScreen(
                                     )
                                 }
                                 Text(
-                                    text = "Server: ${headers.serverUsed} (${headers.implementationVersion ?: "anisette-v3-server"})",
+                                    text = "Host: ${AnisetteClient.extractHostName(headers.serverUsed)} (${headers.implementationVersion ?: "anisette-v3-server"})",
                                     fontSize = 11.sp,
                                     fontFamily = FontFamily.Monospace,
                                     color = CalmBlueLight
@@ -3812,6 +3875,7 @@ fun SettingsTabScreen(
                                 )
 
                                 items.forEach { (key, value) ->
+                                    val summaryValue = "${if (value.isEmpty()) "empty" else "non-empty"} (len=${value.length})"
                                     Column(modifier = Modifier.padding(vertical = 1.dp)) {
                                         Text(
                                             text = key,
@@ -3820,7 +3884,7 @@ fun SettingsTabScreen(
                                             color = TextSecondary
                                         )
                                         Text(
-                                            text = value.ifEmpty { "(empty)" },
+                                            text = summaryValue,
                                             fontSize = 10.sp,
                                             fontFamily = FontFamily.Monospace,
                                             color = TextPrimary,
@@ -3964,6 +4028,39 @@ fun SettingsTabScreen(
                         style = MaterialTheme.typography.titleMedium,
                         fontWeight = FontWeight.Bold,
                         color = TextPrimary
+                    )
+                }
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = "Advanced diagnostics",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = TextPrimary
+                        )
+                        Text(
+                            text = "Log safe init request/response & anisette host summary (default OFF)",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = TextMuted
+                        )
+                    }
+
+                    Switch(
+                        checked = advancedDiagnosticsEnabled,
+                        onCheckedChange = { enabled ->
+                            advancedDiagnosticsEnabled = enabled
+                            com.aistudio.iossideloadbridge.app.diagnostics.AppDiagnostics.advancedDiagnosticsEnabled = enabled
+                        },
+                        colors = SwitchDefaults.colors(
+                            checkedThumbColor = Color.White,
+                            checkedTrackColor = CalmBlue,
+                            uncheckedTrackColor = DarkSurfaceVariant
+                        ),
+                        modifier = Modifier.testTag("advanced_diagnostics_switch")
                     )
                 }
 

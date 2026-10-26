@@ -1,12 +1,14 @@
 package com.aistudio.iossideloadbridge.app.anisette
 
 import android.util.Log
+import com.aistudio.iossideloadbridge.app.diagnostics.AppDiagnostics
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import org.json.JSONObject
 import java.io.IOException
+import java.net.URI
 import java.util.concurrent.TimeUnit
 
 /**
@@ -95,6 +97,25 @@ class AnisetteClient(
             "https://ani.npeg.us",
             "https://anisette.wedotstud.io"
         )
+
+        fun extractHostName(urlOrHost: String): String {
+            val trimmed = urlOrHost.trim()
+            if (trimmed.isEmpty()) return ""
+            return try {
+                val withScheme = if ("://" in trimmed) trimmed else "https://$trimmed"
+                URI(withScheme).host
+                    ?: trimmed.removePrefix("https://").removePrefix("http://").substringBefore('/').substringBefore(':')
+            } catch (_: Exception) {
+                trimmed.removePrefix("https://").removePrefix("http://").substringBefore('/').substringBefore(':')
+            }
+        }
+
+        fun normalizeToServerUrl(urlOrHost: String): String {
+            val host = extractHostName(urlOrHost)
+            return if (host.isNotEmpty()) "https://$host" else urlOrHost.trim().trimEnd('/')
+        }
+
+        val OFFICIAL_HOSTS: List<String> = OFFICIAL_SERVERS.map { extractHostName(it) }
     }
 
     private val httpClient: OkHttpClient = OkHttpClient.Builder()
@@ -107,17 +128,17 @@ class AnisetteClient(
     /**
      * Fetches fresh Anisette headers by querying the anisette servers in a fallback chain.
      *
-     * @param preferredServer Optional specific server URL to prioritize before falling back
+     * @param preferredServer Optional specific server host name or URL to prioritize before falling back
      * @return Result containing [AnisetteHeaders] or failure with aggregated error details
      */
-    suspend fun fetchAnisetteHeaders(preferredServer: String? = null): Result<AnisetteHeaders> =
+    suspend fun fetchAnisetteHeaders(
+        preferredServer: String? = AppDiagnostics.selectedAnisetteHost
+    ): Result<AnisetteHeaders> =
         withContext(Dispatchers.IO) {
+            val normalizedPreferred = preferredServer?.takeIf { it.isNotBlank() }?.let { normalizeToServerUrl(it) }
             val serversToTry = buildList {
-                if (!preferredServer.isNullOrBlank() && preferredServer !in OFFICIAL_SERVERS) {
-                    add(preferredServer.trimEnd('/'))
-                }
-                if (!preferredServer.isNullOrBlank() && preferredServer in OFFICIAL_SERVERS) {
-                    add(preferredServer.trimEnd('/'))
+                if (!normalizedPreferred.isNullOrBlank()) {
+                    add(normalizedPreferred.trimEnd('/'))
                 }
                 OFFICIAL_SERVERS.forEach {
                     val normalized = it.trimEnd('/')
@@ -127,10 +148,18 @@ class AnisetteClient(
                 }
             }
 
+            val fallbackHostNames = serversToTry.map { extractHostName(it) }
+            val triedHostNames = mutableListOf<String>()
+            AppDiagnostics.logAdvancedAuthTrace(
+                "Anisette fallback list (host names in order): [${fallbackHostNames.joinToString(", ")}]"
+            )
+
             val errorLog = mutableListOf<String>()
 
             for (server in serversToTry) {
-                Log.i(TAG, "Attempting Anisette fetch from $server...")
+                val serverHost = extractHostName(server)
+                triedHostNames.add(serverHost)
+                Log.i(TAG, AppDiagnostics.redactSecrets("Attempting Anisette fetch from host $serverHost..."))
                 val startTime = System.currentTimeMillis()
                 try {
                     val request = Request.Builder()
@@ -145,7 +174,7 @@ class AnisetteClient(
                         val implVersion = response.header("Implementation-Version")
 
                         if (!response.isSuccessful) {
-                            val msg = "$server returned HTTP ${response.code} in ${duration}ms"
+                            val msg = AppDiagnostics.redactSecrets("$serverHost returned HTTP ${response.code} in ${duration}ms")
                             Log.w(TAG, msg)
                             errorLog.add(msg)
                             return@use
@@ -153,7 +182,7 @@ class AnisetteClient(
 
                         val body = response.body?.string()
                         if (body.isNullOrBlank()) {
-                            val msg = "$server returned empty body in ${duration}ms"
+                            val msg = AppDiagnostics.redactSecrets("$serverHost returned empty body in ${duration}ms")
                             Log.w(TAG, msg)
                             errorLog.add(msg)
                             return@use
@@ -161,9 +190,9 @@ class AnisetteClient(
 
                         val json = JSONObject(body)
 
-                        // Validate that essential OTP headers exist
+                        // Validate that essential OTP headers exist (do not log raw JSON body)
                         if (!json.has("X-Apple-I-MD") || !json.has("X-Apple-I-MD-M")) {
-                            val msg = "$server returned JSON missing X-Apple-I-MD/X-Apple-I-MD-M (body: $body)"
+                            val msg = AppDiagnostics.redactSecrets("$serverHost returned JSON missing X-Apple-I-MD/X-Apple-I-MD-M")
                             Log.w(TAG, msg)
                             errorLog.add(msg)
                             return@use
@@ -184,18 +213,24 @@ class AnisetteClient(
                             implementationVersion = implVersion
                         )
 
-                        Log.i(TAG, "Successfully retrieved Anisette headers from $server in ${duration}ms ($implVersion)")
+                        AppDiagnostics.logAdvancedAuthTrace(
+                            "Anisette server used (host name): $serverHost | tried in order: [${triedHostNames.joinToString(", ")}] | fallback list: [${fallbackHostNames.joinToString(", ")}]"
+                        )
+                        Log.i(TAG, AppDiagnostics.redactSecrets("Successfully retrieved Anisette headers from host $serverHost in ${duration}ms ($implVersion)"))
                         return@withContext Result.success(headers)
                     }
                 } catch (e: Exception) {
                     val duration = System.currentTimeMillis() - startTime
-                    val errDesc = "$server failed after ${duration}ms: ${e.javaClass.simpleName} - ${e.message}"
+                    val errDesc = AppDiagnostics.redactSecrets("$serverHost failed after ${duration}ms: ${e.javaClass.simpleName} - ${e.message}")
                     Log.w(TAG, errDesc)
                     errorLog.add(errDesc)
                 }
             }
 
-            val summaryError = "All anisette servers in fallback chain failed:\n" + errorLog.joinToString("\n")
+            AppDiagnostics.logAdvancedAuthTrace(
+                "Anisette all servers failed | tried in order: [${triedHostNames.joinToString(", ")}] | fallback list: [${fallbackHostNames.joinToString(", ")}]"
+            )
+            val summaryError = AppDiagnostics.redactSecrets("All anisette servers in fallback chain failed:\n" + errorLog.joinToString("\n"))
             Log.e(TAG, summaryError)
             Result.failure(IOException(summaryError))
         }
