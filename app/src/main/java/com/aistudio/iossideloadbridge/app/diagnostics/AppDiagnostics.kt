@@ -30,14 +30,126 @@ object AppDiagnostics {
     private const val LOG_FILE_NAME = "diagnostics.log"
     private const val CRASH_FILE_NAME = "last_crash.txt"
 
-    const val BUILD_ID = "bld-20261025-init-diag-v14"
+    const val BUILD_ID = "bld-20261028-client-profile-v15"
     const val GIT_COMMIT = "740d752d"
+
+    private const val PREFS_NAME = "sideload_bridge_diag_prefs"
+    private const val KEY_DEVICE_PROFILE = "device_profile"
+    private const val KEY_CUSTOM_CLIENT_INFO = "custom_client_info"
+    private const val KEY_CUSTOM_USER_AGENT = "custom_user_agent"
+    private const val KEY_SELECTED_ANISETTE_HOST = "selected_anisette_host"
+    private const val KEY_ANISETTE_HOST_LIST = "anisette_host_list"
+    private const val KEY_ADV_DIAG_ENABLED = "advanced_diagnostics_enabled"
+
+    const val ANDROID_CLIENT_INFO = "<Pixel 7> <Android;14;UQ1A.240205.002> <com.apple.AuthKit/1 (com.apple.akd/1.0)>"
+    const val WINDOWS_CLIENT_INFO = "<PC> <Windows;6.2(0,0);9200> <com.apple.AuthKit/1 (com.apple.iTunes/12.12.4.1)>"
+    const val WINDOWS_USER_AGENT = "akd/1.0 CFNetwork/808.1.4"
+    const val DEFAULT_USER_AGENT = "akd/1.0 CFNetwork/978.0.7 Darwin/18.7.0"
+
+    enum class DeviceDescriptionProfile(val label: String) {
+        AUTO("Auto"),
+        ANDROID("Android"),
+        WINDOWS("Windows"),
+        CUSTOM("Custom");
+
+        companion object {
+            fun fromName(name: String?): DeviceDescriptionProfile {
+                return entries.firstOrNull { it.name.equals(name, ignoreCase = true) } ?: AUTO
+            }
+        }
+    }
 
     @Volatile
     var advancedDiagnosticsEnabled: Boolean = false
 
     @Volatile
     var selectedAnisetteHost: String? = null
+
+    @Volatile
+    var deviceProfile: DeviceDescriptionProfile = DeviceDescriptionProfile.AUTO
+
+    @Volatile
+    var customClientInfo: String = ""
+
+    @Volatile
+    var customUserAgent: String = ""
+
+    @Volatile
+    var customAnisetteHosts: List<String> = emptyList()
+
+    @Volatile
+    var lastServerClientInfoDiagnostic: String? = null
+
+    fun loadSettings(context: Context) {
+        try {
+            val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            deviceProfile = DeviceDescriptionProfile.fromName(prefs.getString(KEY_DEVICE_PROFILE, DeviceDescriptionProfile.AUTO.name))
+            customClientInfo = prefs.getString(KEY_CUSTOM_CLIENT_INFO, "") ?: ""
+            customUserAgent = prefs.getString(KEY_CUSTOM_USER_AGENT, "") ?: ""
+            selectedAnisetteHost = prefs.getString(KEY_SELECTED_ANISETTE_HOST, null)?.takeIf { it.isNotBlank() }
+            advancedDiagnosticsEnabled = prefs.getBoolean(KEY_ADV_DIAG_ENABLED, false)
+            val savedHostsRaw = prefs.getString(KEY_ANISETTE_HOST_LIST, null)
+            if (!savedHostsRaw.isNullOrBlank()) {
+                val parsed = savedHostsRaw.lines().map { AnisetteClient.extractHostName(it) }.filter { it.isNotEmpty() }.distinct()
+                if (parsed.isNotEmpty()) {
+                    customAnisetteHosts = parsed
+                }
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to load settings: ${e.message}")
+        }
+    }
+
+    fun saveSettings(context: Context) {
+        try {
+            val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            prefs.edit()
+                .putString(KEY_DEVICE_PROFILE, deviceProfile.name)
+                .putString(KEY_CUSTOM_CLIENT_INFO, customClientInfo)
+                .putString(KEY_CUSTOM_USER_AGENT, customUserAgent)
+                .putString(KEY_SELECTED_ANISETTE_HOST, selectedAnisetteHost ?: "")
+                .putBoolean(KEY_ADV_DIAG_ENABLED, advancedDiagnosticsEnabled)
+                .putString(
+                    KEY_ANISETTE_HOST_LIST,
+                    if (customAnisetteHosts.isNotEmpty()) customAnisetteHosts.joinToString("\n") else ""
+                )
+                .apply()
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to save settings: ${e.message}")
+        }
+    }
+
+    /**
+     * Resolves the effective (Client-Info, User-Agent, ProfileName) for GsService2 requests
+     * of a single sign-in attempt (init, complete, apptokens).
+     */
+    fun resolveDeviceDescription(
+        serverReportedClientInfo: String,
+        defaultUserAgent: String = DEFAULT_USER_AGENT
+    ): Triple<String, String, String> {
+        return when (deviceProfile) {
+            DeviceDescriptionProfile.AUTO -> Triple(
+                serverReportedClientInfo,
+                defaultUserAgent,
+                DeviceDescriptionProfile.AUTO.label
+            )
+            DeviceDescriptionProfile.ANDROID -> Triple(
+                ANDROID_CLIENT_INFO,
+                defaultUserAgent,
+                DeviceDescriptionProfile.ANDROID.label
+            )
+            DeviceDescriptionProfile.WINDOWS -> Triple(
+                WINDOWS_CLIENT_INFO,
+                WINDOWS_USER_AGENT,
+                DeviceDescriptionProfile.WINDOWS.label
+            )
+            DeviceDescriptionProfile.CUSTOM -> Triple(
+                customClientInfo.trim().ifEmpty { serverReportedClientInfo },
+                customUserAgent.trim().ifEmpty { defaultUserAgent },
+                DeviceDescriptionProfile.CUSTOM.label
+            )
+        }
+    }
 
     // ---- Authentication Diagnostic Trace ----
     private val authTraceList = java.util.Collections.synchronizedList(mutableListOf<String>())

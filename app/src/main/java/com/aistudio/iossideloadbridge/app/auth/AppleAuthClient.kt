@@ -136,11 +136,14 @@ class AppleAuthClient(
 
         val xmlPayload = ApplePlist.toXml(rootPlist)
 
+        val (effectiveClientInfo, effectiveUserAgent, _) =
+            AppDiagnostics.resolveDeviceDescription(anisetteHeaders.clientInfo, USER_AGENT)
+
         val httpHeaders = mapOf(
             "Content-Type" to "text/x-xml-plist",
             "Accept" to "*/*",
-            "User-Agent" to USER_AGENT,
-            "X-MMe-Client-Info" to anisetteHeaders.clientInfo
+            "User-Agent" to effectiveUserAgent,
+            "X-MMe-Client-Info" to effectiveClientInfo
         )
 
         return DryRunInspection(
@@ -161,6 +164,10 @@ class AppleAuthClient(
     ): Result<SignInState> = withContext(Dispatchers.IO) {
         try {
             val normalizedAppleId = appleId.trim().lowercase(java.util.Locale.US)
+            val (effectiveClientInfo, effectiveUserAgent, profileName) =
+                AppDiagnostics.resolveDeviceDescription(anisetteHeaders.clientInfo, USER_AGENT)
+            val anisetteHost = AnisetteClient.extractHostName(anisetteHeaders.serverUsed)
+
             AppDiagnostics.logAuthTrace(AppDiagnostics.redactSecrets("Starting GSA SRP-6a login (step: init)..."))
 
             // ==========================================
@@ -198,9 +205,17 @@ class AppleAuthClient(
                 )
             )
 
-            val initHttpRequest = buildGsaRequest(GSA_ENDPOINT, initPayload, anisetteHeaders)
+            val initHttpRequest = buildGsaRequest(
+                url = GSA_ENDPOINT,
+                xmlPayload = initPayload,
+                clientInfo = effectiveClientInfo,
+                userAgent = effectiveUserAgent
+            )
 
             if (AppDiagnostics.advancedDiagnosticsEnabled) {
+                AppDiagnostics.logAdvancedAuthTrace(
+                    "init device profile: profile=$profileName, anisetteHost=$anisetteHost, User-Agent=\"$effectiveUserAgent\", X-MMe-Client-Info=\"$effectiveClientInfo\""
+                )
                 val allHeaderNames = initHttpRequest.headers.names().toList()
                 val safeHeadersSummary = allHeaderNames.joinToString(", ") { name ->
                     if (name.equals("Content-Type", ignoreCase = true) ||
@@ -253,7 +268,7 @@ class AppleAuthClient(
                     "X-Apple-I-MD-RINFO=${fieldSummary(anisetteHeaders.mdRinfo)}",
                     "X-Apple-I-MD-LU=${fieldSummary(anisetteHeaders.mdLu)}",
                     "X-Apple-I-SRL-NO=${fieldSummary(anisetteHeaders.srlNo)}",
-                    "X-MMe-Client-Info=${fieldSummary(anisetteHeaders.clientInfo)}",
+                    "X-MMe-Client-Info=${fieldSummary(effectiveClientInfo)}",
                     "X-Apple-I-TimeZone=${fieldSummary(anisetteHeaders.timeZone)}",
                     "X-Apple-Locale=${fieldSummary(anisetteHeaders.locale)}",
                     "X-Mme-Device-Id=${fieldSummary(anisetteHeaders.deviceId)}"
@@ -272,18 +287,46 @@ class AppleAuthClient(
             val initHttpResponse = executeHttpRequest(initHttpRequest)
             AppDiagnostics.logAuthTrace("init response received: HTTP ${initHttpResponse.code}")
 
-            val initParsed = ApplePlist.fromXml(initHttpResponse.body)
+            val trimmedInitBody = initHttpResponse.body.trimStart()
+            val looksLikePlist = trimmedInitBody.contains("<plist", ignoreCase = true) ||
+                trimmedInitBody.contains("<dict", ignoreCase = true)
+            val initParsed: Map<String, Any?> = if (looksLikePlist) {
+                try {
+                    ApplePlist.fromXml(initHttpResponse.body)
+                } catch (_: Throwable) {
+                    emptyMap()
+                }
+            } else {
+                emptyMap()
+            }
+            val isNonPlistInit = !looksLikePlist || initParsed.isEmpty()
+            if (isNonPlistInit) {
+                val first80 = AppDiagnostics.redactSecrets(
+                    initHttpResponse.body.replace(Regex("\\s+"), " ").trim().take(80)
+                )
+                AppDiagnostics.logAuthTrace(
+                    "non-plist response: HTTP ${initHttpResponse.code}, first80=\"$first80\""
+                )
+            }
+
+            val initStatus = AppleResponseHelper.parseStatus(initParsed, initHttpResponse.code)
             if (AppDiagnostics.advancedDiagnosticsEnabled) {
                 val topLevelResponseKeys = initParsed.keys.sorted()
                 @Suppress("UNCHECKED_CAST")
                 val innerResponseKeys = (initParsed["Response"] as? Map<String, Any?>)?.keys?.sorted() ?: emptyList()
+                val ecResultStr = if (isNonPlistInit) "non-plist" else (initStatus.rawErrorCodeStr ?: "0")
                 AppDiagnostics.logAdvancedAuthTrace(
-                    "init response summary: HTTP ${initHttpResponse.code}, topLevelPlistKeys=$topLevelResponseKeys, responseDictKeys=$innerResponseKeys"
+                    "init response summary: profile=$profileName, anisetteHost=$anisetteHost, HTTP ${initHttpResponse.code}, ec=$ecResultStr, topLevelPlistKeys=$topLevelResponseKeys, responseDictKeys=$innerResponseKeys"
                 )
             }
-            val initStatus = AppleResponseHelper.parseStatus(initParsed, initHttpResponse.code)
-            if (!initStatus.isSuccess) {
-                return@withContext parseGsaError(initParsed, initHttpResponse.body, initHttpResponse.code, "init")
+            if (isNonPlistInit || !initStatus.isSuccess) {
+                return@withContext parseGsaError(
+                    parsed = initParsed,
+                    rawXml = initHttpResponse.body,
+                    httpCode = initHttpResponse.code,
+                    stepName = "init",
+                    isNonPlist = isNonPlistInit
+                )
             }
             val activeInitDict = initStatus.activeDict
 
@@ -330,7 +373,12 @@ class AppleAuthClient(
                 )
             )
 
-            val completeHttpRequest = buildGsaRequest(GSA_ENDPOINT, completePayload, anisetteHeaders)
+            val completeHttpRequest = buildGsaRequest(
+                url = GSA_ENDPOINT,
+                xmlPayload = completePayload,
+                clientInfo = effectiveClientInfo,
+                userAgent = effectiveUserAgent
+            )
             AppDiagnostics.logAuthTrace("complete request sent")
             val completeHttpResponse = executeHttpRequest(completeHttpRequest)
 
@@ -525,7 +573,12 @@ class AppleAuthClient(
                 )
             )
 
-            val apptokensHttpRequest = buildGsaRequest(GSA_ENDPOINT, apptokensPayload, anisetteHeaders)
+            val apptokensHttpRequest = buildGsaRequest(
+                url = GSA_ENDPOINT,
+                xmlPayload = apptokensPayload,
+                clientInfo = effectiveClientInfo,
+                userAgent = effectiveUserAgent
+            )
             val apptokensHttpResponse = executeHttpRequest(apptokensHttpRequest)
             AppDiagnostics.logAuthTrace("apptokens HTTP status: ${apptokensHttpResponse.code} ${apptokensHttpResponse.message}")
 
@@ -552,7 +605,8 @@ class AppleAuthClient(
 
             // Check if Apple returned an explicit error status or non-2xx HTTP code
             if (!apptokensStatus.isSuccess) {
-                val errDesc = AppleResponseHelper.formatErrorMessage("apptokens", apptokensStatus)
+                val classified = AppleResponseHelper.classifyError("apptokens", apptokensStatus)
+                val errDesc = classified.toCombinedDisplayString()
                 AppDiagnostics.logAuthTrace("apptokens error: $errDesc")
                 return@withContext Result.success(
                     SignInState.Failure(apptokensStatus.rawErrorCodeStr ?: "AuthError", errDesc, apptokensHttpResponse.body)
@@ -854,14 +908,15 @@ class AppleAuthClient(
     private fun buildGsaRequest(
         url: String,
         xmlPayload: String,
-        anisetteHeaders: AnisetteHeaders
+        clientInfo: String,
+        userAgent: String = USER_AGENT
     ): Request {
         return Request.Builder()
             .url(url)
             .header("Content-Type", "text/x-xml-plist")
             .header("Accept", "*/*")
-            .header("User-Agent", USER_AGENT)
-            .header("X-MMe-Client-Info", anisetteHeaders.clientInfo)
+            .header("User-Agent", userAgent)
+            .header("X-MMe-Client-Info", clientInfo)
             .post(xmlPayload.toRequestBody(PLIST_MEDIA_TYPE))
             .build()
     }
@@ -876,9 +931,6 @@ class AppleAuthClient(
         try {
             httpClient.newCall(request).execute().use { response ->
                 val body = response.body?.string() ?: ""
-                if (!response.isSuccessful && body.isBlank()) {
-                    throw IOException("GSA server returned HTTP ${response.code} ${response.message}")
-                }
                 return GsaHttpResponse(response.code, response.message, body)
             }
         } catch (e: Exception) {
@@ -949,13 +1001,15 @@ class AppleAuthClient(
         parsed: Map<String, Any?>,
         rawXml: String,
         httpCode: Int = 0,
-        stepName: String = ""
+        stepName: String = "",
+        isNonPlist: Boolean = false
     ): Result<SignInState> {
         val status = AppleResponseHelper.parseStatus(parsed, httpCode)
-        val errorDesc = AppleResponseHelper.formatErrorMessage(stepName, status)
-        val errorCode = status.rawErrorCodeStr ?: "AuthError"
+        val classified = AppleResponseHelper.classifyError(stepName, status, isNonPlist = isNonPlist)
+        val errorDesc = classified.toCombinedDisplayString()
+        val errorCode = status.rawErrorCodeStr ?: if (isNonPlist) "HTTP_$httpCode" else "AuthError"
 
-        Log.w(TAG, "GSA returned error: step=$stepName, error=$errorDesc")
+        Log.w(TAG, AppDiagnostics.redactSecrets("GSA returned error: step=$stepName, error=$errorDesc"))
         AppDiagnostics.logAuthTrace("GSA error: $errorDesc")
         return Result.success(SignInState.Failure(errorCode, errorDesc, rawXml))
     }

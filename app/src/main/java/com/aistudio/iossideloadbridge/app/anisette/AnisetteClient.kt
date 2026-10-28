@@ -88,14 +88,24 @@ class AnisetteClient(
 
         /**
          * Known official and community SideStore/AltServer anisette servers
-         * arranged in priority order for the fallback chain.
+         * arranged in priority order for the fallback chain, plus UNVERIFIED candidates.
          */
         val OFFICIAL_SERVERS = listOf(
             "https://ani.sidestore.io",
             "https://ani.sidestore.app",
             "https://ani.846969.xyz",
             "https://ani.npeg.us",
-            "https://anisette.wedotstud.io"
+            "https://anisette.wedotstud.io",
+            "https://mac-ani.jkcoxson.com",
+            "https://new.ani.sidestore.io"
+        )
+
+        /**
+         * Metadata tags for hosts marked UNVERIFIED in the selectable list.
+         */
+        val UNVERIFIED_HOST_LABELS = mapOf(
+            "mac-ani.jkcoxson.com" to "UNVERIFIED",
+            "new.ani.sidestore.io" to "SideStore (New) • UNVERIFIED"
         )
 
         fun extractHostName(urlOrHost: String): String {
@@ -116,6 +126,15 @@ class AnisetteClient(
         }
 
         val OFFICIAL_HOSTS: List<String> = OFFICIAL_SERVERS.map { extractHostName(it) }
+
+        fun getActiveHosts(): List<String> {
+            val custom = AppDiagnostics.customAnisetteHosts
+            return if (custom.isNotEmpty()) custom else OFFICIAL_HOSTS
+        }
+
+        fun getActiveServers(): List<String> {
+            return getActiveHosts().map { normalizeToServerUrl(it) }
+        }
     }
 
     private val httpClient: OkHttpClient = OkHttpClient.Builder()
@@ -124,6 +143,43 @@ class AnisetteClient(
         .writeTimeout(timeoutSeconds, TimeUnit.SECONDS)
         .followRedirects(true)
         .build()
+
+    /**
+     * Reads the selected server's /v3/client_info page for Diagnostics display ONLY (never auto-applied).
+     * Because the real response schema is UNCLEAR without live server inspection, no JSON field names
+     * are guessed; the raw HTTP status and body (redacted) are recorded verbatim.
+     */
+    suspend fun fetchServerClientInfoPage(serverUrlOrHost: String): String = withContext(Dispatchers.IO) {
+        val baseUrl = normalizeToServerUrl(serverUrlOrHost)
+        val host = extractHostName(baseUrl)
+        val targetUrl = "$baseUrl/v3/client_info"
+        try {
+            val request = Request.Builder()
+                .url(targetUrl)
+                .header("Accept", "application/json, text/plain, */*")
+                .header("User-Agent", "iOS-Sideload-Bridge-Android/1.0")
+                .get()
+                .build()
+
+            httpClient.newCall(request).execute().use { response ->
+                val rawBody = (response.body?.string() ?: "").trim()
+                val safeSnippet = AppDiagnostics.redactSecrets(rawBody.take(400))
+                val summary = if (response.isSuccessful && safeSnippet.isNotEmpty()) {
+                    "host=$host (/v3/client_info) -> HTTP ${response.code}: $safeSnippet"
+                } else {
+                    "host=$host (/v3/client_info) -> HTTP ${response.code} (${if (safeSnippet.isEmpty()) "empty body" else safeSnippet})"
+                }
+                AppDiagnostics.lastServerClientInfoDiagnostic = summary
+                AppDiagnostics.logAdvancedAuthTrace("Server /v3/client_info (diagnostics only, not applied): $summary")
+                summary
+            }
+        } catch (e: Exception) {
+            val errSummary = AppDiagnostics.redactSecrets("host=$host (/v3/client_info) failed: ${e.javaClass.simpleName}: ${e.message}")
+            AppDiagnostics.lastServerClientInfoDiagnostic = errSummary
+            AppDiagnostics.logAdvancedAuthTrace("Server /v3/client_info (diagnostics only): $errSummary")
+            errSummary
+        }
+    }
 
     /**
      * Fetches fresh Anisette headers by querying the anisette servers in a fallback chain.
@@ -135,12 +191,13 @@ class AnisetteClient(
         preferredServer: String? = AppDiagnostics.selectedAnisetteHost
     ): Result<AnisetteHeaders> =
         withContext(Dispatchers.IO) {
+            val activeServers = getActiveServers()
             val normalizedPreferred = preferredServer?.takeIf { it.isNotBlank() }?.let { normalizeToServerUrl(it) }
             val serversToTry = buildList {
                 if (!normalizedPreferred.isNullOrBlank()) {
                     add(normalizedPreferred.trimEnd('/'))
                 }
-                OFFICIAL_SERVERS.forEach {
+                activeServers.forEach {
                     val normalized = it.trimEnd('/')
                     if (normalized !in this) {
                         add(normalized)
@@ -216,6 +273,8 @@ class AnisetteClient(
                         AppDiagnostics.logAdvancedAuthTrace(
                             "Anisette server used (host name): $serverHost | tried in order: [${triedHostNames.joinToString(", ")}] | fallback list: [${fallbackHostNames.joinToString(", ")}]"
                         )
+                        // Read /v3/client_info for Diagnostics only (do not auto-apply)
+                        fetchServerClientInfoPage(server)
                         Log.i(TAG, AppDiagnostics.redactSecrets("Successfully retrieved Anisette headers from host $serverHost in ${duration}ms ($implVersion)"))
                         return@withContext Result.success(headers)
                     }
