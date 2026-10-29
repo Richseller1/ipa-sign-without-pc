@@ -110,6 +110,7 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
+        com.aistudio.iossideloadbridge.app.diagnostics.AppDiagnostics.loadSettings(applicationContext)
 
         usbBridge = UsbBridge(applicationContext)
 
@@ -2188,8 +2189,11 @@ fun AppleAccountCard(
                 // Signed Out View (Input & Authentication Flow)
                 // ==========================================
 
-                // Error message banner
+                // Error message banner (plain-English message + raw code in small text)
                 if (authErrorMessage != null) {
+                    val parts = authErrorMessage.split("\nRaw: ", limit = 2)
+                    val plainMessage = parts[0]
+                    val rawCodeSmall = parts.getOrNull(1)
                     Surface(
                         color = StatusRed.copy(alpha = 0.15f),
                         shape = RoundedCornerShape(8.dp),
@@ -2198,15 +2202,26 @@ fun AppleAccountCard(
                     ) {
                         Row(
                             modifier = Modifier.padding(10.dp),
-                            verticalAlignment = Alignment.CenterVertically,
+                            verticalAlignment = Alignment.Top,
                             horizontalArrangement = Arrangement.spacedBy(8.dp)
                         ) {
                             Icon(Icons.Default.ErrorOutline, contentDescription = null, tint = StatusRed, modifier = Modifier.size(18.dp))
-                            Text(
-                                text = authErrorMessage,
-                                style = MaterialTheme.typography.bodySmall,
-                                color = StatusRed
-                            )
+                            Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                                Text(
+                                    text = plainMessage,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    fontWeight = FontWeight.Medium,
+                                    color = StatusRed
+                                )
+                                if (!rawCodeSmall.isNullOrBlank()) {
+                                    Text(
+                                        text = "Raw: $rawCodeSmall",
+                                        fontSize = 10.sp,
+                                        fontFamily = FontFamily.Monospace,
+                                        color = TextMuted
+                                    )
+                                }
+                            }
                         }
                     }
                 }
@@ -3376,6 +3391,11 @@ fun DiagnosticsTabScreen(
 
         // 2. Authentication & Token Diagnostics Trace Card
         var authTraceList by remember { mutableStateOf(com.aistudio.iossideloadbridge.app.diagnostics.AppDiagnostics.getAuthTrace()) }
+        var serverClientInfoDiag by remember {
+            mutableStateOf(com.aistudio.iossideloadbridge.app.diagnostics.AppDiagnostics.lastServerClientInfoDiagnostic)
+        }
+        var isFetchingClientInfoPage by remember { mutableStateOf(false) }
+        val diagAnisetteClient = remember { AnisetteClient(timeoutSeconds = 5L) }
 
         Card(
             modifier = Modifier.fillMaxWidth().testTag("auth_trace_card"),
@@ -3395,6 +3415,7 @@ fun DiagnosticsTabScreen(
                     Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                         TextButton(onClick = {
                             authTraceList = com.aistudio.iossideloadbridge.app.diagnostics.AppDiagnostics.getAuthTrace()
+                            serverClientInfoDiag = com.aistudio.iossideloadbridge.app.diagnostics.AppDiagnostics.lastServerClientInfoDiagnostic
                         }) {
                             Text("Refresh", fontSize = 11.sp, color = CalmBlue)
                         }
@@ -3408,6 +3429,66 @@ fun DiagnosticsTabScreen(
                 }
 
                 HorizontalDivider(color = DarkBorder, thickness = 1.dp)
+
+                // Server /v3/client_info read-only diagnostics panel (never auto-applied; response schema UNCLEAR)
+                Surface(
+                    color = DarkBackground,
+                    shape = RoundedCornerShape(8.dp),
+                    border = androidx.compose.foundation.BorderStroke(1.dp, DarkBorder),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Column(
+                        modifier = Modifier.padding(10.dp),
+                        verticalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text = "Server /v3/client_info (Diagnostics Only • Schema UNCLEAR)",
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                color = CalmBlueLight
+                            )
+                            TextButton(
+                                onClick = {
+                                    if (!isFetchingClientInfoPage) {
+                                        coroutineScope.launch {
+                                            isFetchingClientInfoPage = true
+                                            try {
+                                                val targetHost = com.aistudio.iossideloadbridge.app.diagnostics.AppDiagnostics.selectedAnisetteHost
+                                                    ?: AnisetteClient.getActiveHosts().firstOrNull()
+                                                    ?: "ani.sidestore.io"
+                                                serverClientInfoDiag = diagAnisetteClient.fetchServerClientInfoPage(targetHost)
+                                                authTraceList = com.aistudio.iossideloadbridge.app.diagnostics.AppDiagnostics.getAuthTrace()
+                                            } finally {
+                                                isFetchingClientInfoPage = false
+                                            }
+                                        }
+                                    }
+                                },
+                                enabled = !isFetchingClientInfoPage,
+                                contentPadding = PaddingValues(horizontal = 6.dp, vertical = 2.dp),
+                                modifier = Modifier.height(26.dp).testTag("read_v3_client_info_button")
+                            ) {
+                                Text(
+                                    text = if (isFetchingClientInfoPage) "Reading..." else "Read /v3/client_info",
+                                    fontSize = 10.sp,
+                                    color = CalmBlue
+                                )
+                            }
+                        }
+                        Text(
+                            text = serverClientInfoDiag
+                                ?: "Not read yet (tap 'Read /v3/client_info' or run a sign-in / fetch; never auto-applied).",
+                            fontFamily = FontFamily.Monospace,
+                            fontSize = 10.sp,
+                            color = TextSecondary
+                        )
+                    }
+                }
 
                 if (authTraceList.isEmpty()) {
                     Text("No authentication steps recorded yet. Sign in with Apple ID to generate a trace.", style = MaterialTheme.typography.bodySmall, color = TextMuted)
@@ -3467,10 +3548,29 @@ fun SettingsTabScreen(
     }
 
     val anisetteClient = remember { AnisetteClient(timeoutSeconds = 5L) }
-    val serverList = AnisetteClient.OFFICIAL_SERVERS
+    var activeHostList by remember {
+        mutableStateOf(AnisetteClient.getActiveHosts())
+    }
+    val serverList = remember(activeHostList) {
+        activeHostList.map { AnisetteClient.normalizeToServerUrl(it) }
+    }
+    var showEditHostList by remember { mutableStateOf(false) }
+    var editableHostsText by remember {
+        mutableStateOf(activeHostList.joinToString("\n"))
+    }
     // null = Automatic (current default fallback order); otherwise a specific host name
     var selectedHost by remember {
         mutableStateOf(com.aistudio.iossideloadbridge.app.diagnostics.AppDiagnostics.selectedAnisetteHost)
+    }
+
+    var selectedProfile by remember {
+        mutableStateOf(com.aistudio.iossideloadbridge.app.diagnostics.AppDiagnostics.deviceProfile)
+    }
+    var customClientInfoText by remember {
+        mutableStateOf(com.aistudio.iossideloadbridge.app.diagnostics.AppDiagnostics.customClientInfo)
+    }
+    var customUserAgentText by remember {
+        mutableStateOf(com.aistudio.iossideloadbridge.app.diagnostics.AppDiagnostics.customUserAgent)
     }
 
     var serverStatuses by remember { mutableStateOf<Map<String, ServerCheckResult>>(emptyMap()) }
@@ -3482,7 +3582,7 @@ fun SettingsTabScreen(
 
     // Auto-check the first server on initial view to provide immediate feedback
     LaunchedEffect(Unit) {
-        if (serverStatuses.isEmpty()) {
+        if (serverStatuses.isEmpty() && serverList.isNotEmpty()) {
             val targetUrl = selectedHost?.let { AnisetteClient.normalizeToServerUrl(it) } ?: serverList[0]
             val result = anisetteClient.checkServer(targetUrl)
             serverStatuses = mapOf(targetUrl to result)
@@ -3505,10 +3605,155 @@ fun SettingsTabScreen(
                 color = TextPrimary
             )
             Text(
-                text = "Anisette endpoints, storage, and bridge diagnostics",
+                text = "Device description profile, Anisette endpoints, storage, and diagnostics",
                 style = MaterialTheme.typography.bodySmall,
                 color = TextSecondary
             )
+        }
+
+        // 0. Device Description Profile Section (Sign-in GsService2 step only)
+        Card(
+            modifier = Modifier
+                .fillMaxWidth()
+                .testTag("device_profile_settings_card"),
+            shape = RoundedCornerShape(16.dp),
+            colors = CardDefaults.cardColors(containerColor = DarkSurface),
+            elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(16.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Devices,
+                        contentDescription = null,
+                        tint = CalmBlue,
+                        modifier = Modifier.size(20.dp)
+                    )
+                    Text(
+                        text = "Device description profile",
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.Bold,
+                        color = TextPrimary
+                    )
+                }
+
+                Text(
+                    text = "Applied consistently to GsService2 sign-in requests (init, complete, apptokens).",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = TextSecondary
+                )
+
+                val profileOptions = listOf(
+                    Triple(
+                        com.aistudio.iossideloadbridge.app.diagnostics.AppDiagnostics.DeviceDescriptionProfile.AUTO,
+                        "Auto (server-reported, default)",
+                        "Uses X-MMe-Client-Info from the Anisette server + User-Agent \"${com.aistudio.iossideloadbridge.app.diagnostics.AppDiagnostics.DEFAULT_USER_AGENT}\""
+                    ),
+                    Triple(
+                        com.aistudio.iossideloadbridge.app.diagnostics.AppDiagnostics.DeviceDescriptionProfile.ANDROID,
+                        "Android (A)",
+                        "Client-Info: ${com.aistudio.iossideloadbridge.app.diagnostics.AppDiagnostics.ANDROID_CLIENT_INFO}"
+                    ),
+                    Triple(
+                        com.aistudio.iossideloadbridge.app.diagnostics.AppDiagnostics.DeviceDescriptionProfile.WINDOWS,
+                        "Windows (B)",
+                        "Client-Info: ${com.aistudio.iossideloadbridge.app.diagnostics.AppDiagnostics.WINDOWS_CLIENT_INFO}\nUser-Agent: ${com.aistudio.iossideloadbridge.app.diagnostics.AppDiagnostics.WINDOWS_USER_AGENT}"
+                    ),
+                    Triple(
+                        com.aistudio.iossideloadbridge.app.diagnostics.AppDiagnostics.DeviceDescriptionProfile.CUSTOM,
+                        "Custom",
+                        "Specify custom X-MMe-Client-Info and User-Agent strings below"
+                    )
+                )
+
+                profileOptions.forEach { (profile, title, subtitle) ->
+                    val isSelected = selectedProfile == profile
+                    Surface(
+                        color = if (isSelected) CalmBlueContainer.copy(alpha = 0.35f) else DarkBackground,
+                        shape = RoundedCornerShape(10.dp),
+                        border = androidx.compose.foundation.BorderStroke(
+                            1.dp,
+                            if (isSelected) CalmBlue else DarkBorder
+                        ),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("device_profile_option_${profile.name.lowercase()}")
+                            .clickable {
+                                selectedProfile = profile
+                                com.aistudio.iossideloadbridge.app.diagnostics.AppDiagnostics.deviceProfile = profile
+                                com.aistudio.iossideloadbridge.app.diagnostics.AppDiagnostics.saveSettings(context)
+                            }
+                    ) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 12.dp, vertical = 10.dp),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                                Text(
+                                    text = title,
+                                    fontWeight = if (isSelected) FontWeight.SemiBold else FontWeight.Normal,
+                                    fontSize = 12.sp,
+                                    color = TextPrimary
+                                )
+                                Text(
+                                    text = subtitle,
+                                    fontFamily = FontFamily.Monospace,
+                                    fontSize = 10.sp,
+                                    color = TextMuted
+                                )
+                            }
+                            if (isSelected) {
+                                Icon(
+                                    imageVector = Icons.Default.CheckCircle,
+                                    contentDescription = "Selected",
+                                    tint = CalmBlue,
+                                    modifier = Modifier.size(18.dp)
+                                )
+                            }
+                        }
+                    }
+                }
+
+                if (selectedProfile == com.aistudio.iossideloadbridge.app.diagnostics.AppDiagnostics.DeviceDescriptionProfile.CUSTOM) {
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        OutlinedTextField(
+                            value = customClientInfoText,
+                            onValueChange = {
+                                customClientInfoText = it
+                                com.aistudio.iossideloadbridge.app.diagnostics.AppDiagnostics.customClientInfo = it
+                                com.aistudio.iossideloadbridge.app.diagnostics.AppDiagnostics.saveSettings(context)
+                            },
+                            label = { Text("Custom Client-Info (X-MMe-Client-Info)") },
+                            placeholder = { Text(com.aistudio.iossideloadbridge.app.diagnostics.AppDiagnostics.ANDROID_CLIENT_INFO) },
+                            singleLine = false,
+                            maxLines = 3,
+                            modifier = Modifier.fillMaxWidth().testTag("custom_client_info_input")
+                        )
+                        OutlinedTextField(
+                            value = customUserAgentText,
+                            onValueChange = {
+                                customUserAgentText = it
+                                com.aistudio.iossideloadbridge.app.diagnostics.AppDiagnostics.customUserAgent = it
+                                com.aistudio.iossideloadbridge.app.diagnostics.AppDiagnostics.saveSettings(context)
+                            },
+                            label = { Text("Custom User-Agent") },
+                            placeholder = { Text(com.aistudio.iossideloadbridge.app.diagnostics.AppDiagnostics.DEFAULT_USER_AGENT) },
+                            singleLine = true,
+                            modifier = Modifier.fillMaxWidth().testTag("custom_user_agent_input")
+                        )
+                    }
+                }
+            }
         }
 
         // 1. Anisette Server Section
@@ -3595,6 +3840,7 @@ fun SettingsTabScreen(
                             .clickable {
                                 selectedHost = null
                                 com.aistudio.iossideloadbridge.app.diagnostics.AppDiagnostics.selectedAnisetteHost = null
+                                com.aistudio.iossideloadbridge.app.diagnostics.AppDiagnostics.saveSettings(context)
                             }
                     ) {
                         Row(
@@ -3625,7 +3871,7 @@ fun SettingsTabScreen(
                                     )
                                 }
                                 Text(
-                                    text = AnisetteClient.OFFICIAL_HOSTS.joinToString(" → "),
+                                    text = activeHostList.joinToString(" → "),
                                     fontFamily = FontFamily.Monospace,
                                     fontSize = 10.sp,
                                     color = TextMuted
@@ -3646,6 +3892,7 @@ fun SettingsTabScreen(
                         val hostName = AnisetteClient.extractHostName(serverUrl)
                         val check = serverStatuses[serverUrl]
                         val isSelected = selectedHost == hostName
+                        val unverifiedBadge = AnisetteClient.UNVERIFIED_HOST_LABELS[hostName]
 
                         Surface(
                             color = if (isSelected) CalmBlueContainer.copy(alpha = 0.35f) else DarkBackground,
@@ -3660,6 +3907,7 @@ fun SettingsTabScreen(
                                 .clickable {
                                     selectedHost = hostName
                                     com.aistudio.iossideloadbridge.app.diagnostics.AppDiagnostics.selectedAnisetteHost = hostName
+                                    com.aistudio.iossideloadbridge.app.diagnostics.AppDiagnostics.saveSettings(context)
                                 }
                         ) {
                             Row(
@@ -3681,6 +3929,16 @@ fun SettingsTabScreen(
                                             fontSize = 12.sp,
                                             color = TextPrimary
                                         )
+                                        if (unverifiedBadge != null) {
+                                            Text(
+                                                text = unverifiedBadge,
+                                                fontSize = 9.sp,
+                                                color = StatusAmber,
+                                                modifier = Modifier
+                                                    .background(StatusAmber.copy(alpha = 0.18f), RoundedCornerShape(4.dp))
+                                                    .padding(horizontal = 4.dp, vertical = 1.dp)
+                                            )
+                                        }
                                     }
 
                                     // Real status text per server
@@ -3717,6 +3975,75 @@ fun SettingsTabScreen(
                                     )
                                 }
                             }
+                        }
+                    }
+                }
+
+                // Manual Host List Editor Toggle & Input
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    TextButton(
+                        onClick = {
+                            editableHostsText = activeHostList.joinToString("\n")
+                            showEditHostList = !showEditHostList
+                        },
+                        modifier = Modifier.testTag("edit_anisette_hosts_toggle")
+                    ) {
+                        Icon(Icons.Default.Edit, contentDescription = null, modifier = Modifier.size(14.dp), tint = CalmBlue)
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text(
+                            text = if (showEditHostList) "Hide Host List Editor" else "Edit Host List Manually",
+                            fontSize = 11.sp,
+                            color = CalmBlue
+                        )
+                    }
+                    if (com.aistudio.iossideloadbridge.app.diagnostics.AppDiagnostics.customAnisetteHosts.isNotEmpty()) {
+                        TextButton(
+                            onClick = {
+                                com.aistudio.iossideloadbridge.app.diagnostics.AppDiagnostics.customAnisetteHosts = emptyList()
+                                com.aistudio.iossideloadbridge.app.diagnostics.AppDiagnostics.saveSettings(context)
+                                activeHostList = AnisetteClient.getActiveHosts()
+                                editableHostsText = activeHostList.joinToString("\n")
+                            },
+                            modifier = Modifier.testTag("reset_anisette_hosts_button")
+                        ) {
+                            Text("Reset to Default Hosts", fontSize = 11.sp, color = StatusAmber)
+                        }
+                    }
+                }
+
+                if (showEditHostList) {
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        OutlinedTextField(
+                            value = editableHostsText,
+                            onValueChange = { editableHostsText = it },
+                            label = { Text("Anisette Hosts (one host name per line)") },
+                            minLines = 3,
+                            maxLines = 8,
+                            modifier = Modifier.fillMaxWidth().testTag("anisette_hosts_editor_input")
+                        )
+                        Button(
+                            onClick = {
+                                val parsed = editableHostsText.lines()
+                                    .map { AnisetteClient.extractHostName(it) }
+                                    .filter { it.isNotEmpty() }
+                                    .distinct()
+                                if (parsed.isNotEmpty()) {
+                                    com.aistudio.iossideloadbridge.app.diagnostics.AppDiagnostics.customAnisetteHosts = parsed
+                                    com.aistudio.iossideloadbridge.app.diagnostics.AppDiagnostics.saveSettings(context)
+                                    activeHostList = AnisetteClient.getActiveHosts()
+                                    showEditHostList = false
+                                    Toast.makeText(context, "Saved ${parsed.size} Anisette host(s)", Toast.LENGTH_SHORT).show()
+                                }
+                            },
+                            shape = RoundedCornerShape(10.dp),
+                            colors = ButtonDefaults.buttonColors(containerColor = CalmBlue, contentColor = Color.White),
+                            modifier = Modifier.fillMaxWidth().testTag("save_anisette_hosts_button")
+                        ) {
+                            Text("Save Host List", fontSize = 12.sp)
                         }
                     }
                 }
@@ -4054,6 +4381,7 @@ fun SettingsTabScreen(
                         onCheckedChange = { enabled ->
                             advancedDiagnosticsEnabled = enabled
                             com.aistudio.iossideloadbridge.app.diagnostics.AppDiagnostics.advancedDiagnosticsEnabled = enabled
+                            com.aistudio.iossideloadbridge.app.diagnostics.AppDiagnostics.saveSettings(context)
                         },
                         colors = SwitchDefaults.colors(
                             checkedThumbColor = Color.White,
